@@ -128,6 +128,13 @@ import base64
 import tempfile
 from typing import Tuple
 
+# --- Дополнительные импорты для Flask и потока ---
+from flask import Flask, request
+from threading import Thread
+import time
+import requests
+# -------------------------------------------------
+
 from gtts import gTTS
 from mutagen.mp3 import MP3  # <-- для чтения длительности MP3
 from openai import OpenAI
@@ -141,14 +148,17 @@ from telegram.ext import (
     CallbackQueryHandler,
 )
 
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
 # Глобальная память для хранения последнего текстового сообщения пользователя (для контекста)
 chat_memory = {}
 # Глобальное состояние голосового режима для каждого чата
 voice_mode_enabled = {}  # ключ: chat_id, значение: bool
 
 class Config:
-    TELEGRAM_TOKEN = "8066853463:AAGEUpF-kpBu8he8zBX9oS0HkBUBlLlwh48"
-    OPENAI_API_KEY = "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"
+    TELEGRAM_TOKEN = TELEGRAM_TOKEN
+    OPENAI_API_KEY = OPENAI_API_KEY
     OPENAI_MODEL_TEXT = "gpt-4o-mini"
     WHISPER_MODEL = "whisper-1"
 
@@ -168,7 +178,6 @@ def generate_voice_answer_gtts(text: str) -> str:
     Генерирует MP3-файл через gTTS в текущей папке.
     Возвращает имя созданного файла (путь).
     """
-    # Генерируем уникальное имя файла, чтобы избежать коллизий
     filename = f"voice_{uuid.uuid4().hex}.mp3"
     tts = gTTS(text=text, lang='ru')
     tts.save(filename)
@@ -296,28 +305,22 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # Если включён голосовой режим
     if voice_mode_enabled.get(chat_id, False):
-        # 1. Генерируем MP3 в текущей папке
         mp3_filename = generate_voice_answer_gtts(response_text)
-
-        # 2. Определяем длительность MP3 (секунды) через mutagen
         audio_info = MP3(mp3_filename)
         duration = int(audio_info.info.length) if audio_info and audio_info.info else 0
 
-        # 3. Отправляем как voice
         try:
             with open(mp3_filename, "rb") as f:
                 await update.message.reply_voice(
                     voice=InputFile(f),
-                    duration=duration  # чтобы не было 00:00
+                    duration=duration
                 )
         except Exception as e:
             logger.error(f"Ошибка при отправке голосового ответа: {e}")
             await update.message.reply_text("Не удалось отправить голосовой ответ.")
         finally:
-            # 4. Удаляем файл
             os.remove(mp3_filename)
     else:
-        # Если голосовой режим выключен
         await update.message.reply_text(response_text)
 
 # ------------------------------------------------------
@@ -330,7 +333,6 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Сбой в работе бота. Попробуйте позже.")
         return
 
-    # Загружаем voice в байты
     try:
         file = await update.message.voice.get_file()
         file_bytes = await file.download_as_bytearray()
@@ -339,7 +341,6 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Не удалось загрузить голосовое сообщение.")
         return
 
-    # Транскрибируем и генерируем ответ
     transcribed_text, mp3_path = await chat_handler.process_voice_message(file_bytes)
     if transcribed_text is None:
         await update.message.reply_text("Ошибка при распознавании речи.")
@@ -348,10 +349,8 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Ошибка при генерации голосового ответа.")
         return
 
-    # Сообщим пользователю, что распознали
     await update.message.reply_text(f"Распознано: {transcribed_text}")
 
-    # Отправим ответ как голос
     try:
         audio_info = MP3(mp3_path)
         duration = int(audio_info.info.length) if audio_info and audio_info.info else 0
@@ -364,7 +363,6 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.error(f"Ошибка при отправке голосового ответа: {e}")
         await update.message.reply_text("Не удалось отправить голосовой ответ.")
     finally:
-        # Удаляем файл после отправки
         os.remove(mp3_path)
 
 # ------------------------------------------------------
@@ -388,8 +386,6 @@ async def handle_image_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Не удалось обработать изображение.")
         return
 
-    # Если у вас есть метод get_image_response, добавьте его
-    # Но в примере кода у вас он был
     try:
         messages = [
             {
@@ -413,22 +409,42 @@ async def handle_image_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Произошла ошибка при анализе изображения. Попробуйте позже.")
 
 # ------------------------------------------------------
+# Код Flask keep_alive
+# ------------------------------------------------------
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "I'm alive"
+
+def run():
+    app.run(host='0.0.0.0', port=80)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
+
+# ------------------------------------------------------
 # Основная точка входа
 # ------------------------------------------------------
 def main():
-    app = Application.builder().token(Config.TELEGRAM_TOKEN).build()
-    chat_handler = ChatGPTHandler(Config.OPENAI_API_KEY)
-    app.bot_data["chat_handler"] = chat_handler
+    # Сначала запускаем keep_alive
+    keep_alive()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
-    app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_image_message))
+    application = Application.builder().token(Config.TELEGRAM_TOKEN).build()
+    chat_handler = ChatGPTHandler(Config.OPENAI_API_KEY)
+    application.bot_data["chat_handler"] = chat_handler
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    application.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_image_message))
 
     logger.info("Бот запущен. Начинается опрос сервера Telegram...")
-    app.run_polling()
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
+
