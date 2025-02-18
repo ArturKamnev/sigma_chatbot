@@ -128,6 +128,13 @@ import base64
 import tempfile
 from typing import Tuple
 
+# --- Дополнительные импорты для Flask и потока ---
+from flask import Flask, request
+from threading import Thread
+import time
+import requests
+# -------------------------------------------------
+
 from gtts import gTTS
 from mutagen.mp3 import MP3  # <-- для чтения длительности MP3
 from openai import OpenAI
@@ -141,7 +148,6 @@ from telegram.ext import (
     CallbackQueryHandler,
 )
 
-# Считываем токен Telegram и ключ OpenAI из переменных окружения
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
@@ -189,7 +195,7 @@ class ChatGPTHandler:
         if context_msgs:
             for msg in context_msgs:
                 messages.append({"role": "user", "content": f"Предыдущее сообщение: {msg}"})
-        messages.append({"role": "user", "content": prompt + "\n Используй пожалуйста в своем сообщении эмодзи"})
+        messages.append({"role": "user", "content": "\n Use in your message emojis" + prompt })
         try:
             response = await asyncio.to_thread(
                 self.client.chat.completions.create,
@@ -379,8 +385,6 @@ async def handle_image_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Не удалось обработать изображение.")
         return
 
-    # Если у вас есть метод get_image_response, добавьте его
-    # Но в примере кода у вас он был
     try:
         messages = [
             {
@@ -404,26 +408,43 @@ async def handle_image_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Произошла ошибка при анализе изображения. Попробуйте позже.")
 
 # ------------------------------------------------------
-# Основная функция запуска бота
+# Код Flask keep_alive
+# ------------------------------------------------------
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "I'm alive"
+
+def run():
+    # Используем порт, предоставленный Replit (или 8080 по умолчанию)
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
+
+# ------------------------------------------------------
+# Основная точка входа
 # ------------------------------------------------------
 def main():
-    # Создаём экземпляр Application, используя токен из переменной окружения
-    app = Application.builder().token(Config.TELEGRAM_TOKEN).build()
+    # Запускаем Flask-сервер (keep_alive)
+    keep_alive()
 
-    # Создаём обработчик ChatGPT
+    application = Application.builder().token(Config.TELEGRAM_TOKEN).build()
     chat_handler = ChatGPTHandler(Config.OPENAI_API_KEY)
-    app.bot_data["chat_handler"] = chat_handler
+    application.bot_data["chat_handler"] = chat_handler
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
-    app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_image_message))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    application.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_image_message))
 
     logger.info("Бот запущен. Начинается опрос сервера Telegram...")
-    app.run_polling()
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
-
