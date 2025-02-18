@@ -148,7 +148,6 @@ from telegram.ext import (
     CallbackQueryHandler,
 )
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # Глобальная память для хранения последнего текстового сообщения пользователя (для контекста)
@@ -157,7 +156,7 @@ chat_memory = {}
 voice_mode_enabled = {}  # ключ: chat_id, значение: bool
 
 class Config:
-    TELEGRAM_TOKEN = TELEGRAM_TOKEN
+    TELEGRAM_TOKEN = 8066853463:AAGEUpF-kpBu8he8zBX9oS0HkBUBlLlwh48
     OPENAI_API_KEY = OPENAI_API_KEY
     OPENAI_MODEL_TEXT = "gpt-4o-mini"
     WHISPER_MODEL = "whisper-1"
