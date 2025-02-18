@@ -128,13 +128,6 @@ import base64
 import tempfile
 from typing import Tuple
 
-# --- Дополнительные импорты для Flask и потока ---
-from flask import Flask, request
-from threading import Thread
-import time
-import requests
-# -------------------------------------------------
-
 from gtts import gTTS
 from mutagen.mp3 import MP3  # <-- для чтения длительности MP3
 from openai import OpenAI
@@ -148,6 +141,7 @@ from telegram.ext import (
     CallbackQueryHandler,
 )
 
+# Считываем токен Telegram и ключ OpenAI из переменных окружения
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
@@ -303,7 +297,6 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     response_text = await chat_handler.get_text_response(user_message, context_msgs)
     chat_memory[chat_id] = user_message  # Сохраняем для контекста
 
-    # Если включён голосовой режим
     if voice_mode_enabled.get(chat_id, False):
         mp3_filename = generate_voice_answer_gtts(response_text)
         audio_info = MP3(mp3_filename)
@@ -386,6 +379,8 @@ async def handle_image_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Не удалось обработать изображение.")
         return
 
+    # Если у вас есть метод get_image_response, добавьте его
+    # Но в примере кода у вас он был
     try:
         messages = [
             {
@@ -409,41 +404,25 @@ async def handle_image_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Произошла ошибка при анализе изображения. Попробуйте позже.")
 
 # ------------------------------------------------------
-# Код Flask keep_alive
-# ------------------------------------------------------
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "I'm alive"
-
-def run():
-    app.run(host='0.0.0.0', port=80)
-
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
-
-# ------------------------------------------------------
-# Основная точка входа
+# Основная функция запуска бота
 # ------------------------------------------------------
 def main():
-    # Сначала запускаем keep_alive
-    keep_alive()
+    # Создаём экземпляр Application, используя токен из переменной окружения
+    app = Application.builder().token(Config.TELEGRAM_TOKEN).build()
 
-    application = Application.builder().token(Config.TELEGRAM_TOKEN).build()
+    # Создаём обработчик ChatGPT
     chat_handler = ChatGPTHandler(Config.OPENAI_API_KEY)
-    application.bot_data["chat_handler"] = chat_handler
+    app.bot_data["chat_handler"] = chat_handler
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CallbackQueryHandler(button_callback))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
-    application.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
-    application.add_handler(MessageHandler(filters.PHOTO, handle_image_message))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CallbackQueryHandler(button_callback))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_image_message))
 
     logger.info("Бот запущен. Начинается опрос сервера Telegram...")
-    application.run_polling()
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
