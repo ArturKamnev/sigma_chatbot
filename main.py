@@ -150,12 +150,15 @@ from telegram.ext import (
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# Глобальная память для хранения последнего текстового сообщения пользователя (для контекста)
+# Глобальная память для хранения всей переписки для каждого пользователя
+# chat_memory[chat_id] = [ { "role": "system"/"user"/"assistant", "content": "..." }, ... ]
 chat_memory = {}
+
 # Глобальное состояние голосового режима для каждого чата
 voice_mode_enabled = {}  # ключ: chat_id, значение: bool
 
 class Config:
+    # Токен Telegram тоже лучше брать из переменной окружения, но если хотите оставить – оставьте
     TELEGRAM_TOKEN = "8066853463:AAGEUpF-kpBu8he8zBX9oS0HkBUBlLlwh48"
     OPENAI_API_KEY = OPENAI_API_KEY
     OPENAI_MODEL_TEXT = "gpt-4o-mini"
@@ -189,26 +192,50 @@ class ChatGPTHandler:
     def __init__(self, api_key: str):
         self.client = OpenAI(api_key=api_key)
 
-    async def get_text_response(self, prompt: str, context_msgs: list = None) -> str:
-        messages = []
-        if context_msgs:
-            for msg in context_msgs:
-                messages.append({"role": "user", "content": f"Предыдущее сообщение: {msg}"})
-        messages.append({"role": "user", "content": "\n Use in your message emojis" + prompt })
+    async def get_text_response(self, user_message: str, chat_id: int) -> str:
+        """
+        Формирует полный список сообщений из chat_memory[chat_id],
+        добавляет новое сообщение пользователя, вызывает OpenAI,
+        и сохраняет ответ в chat_memory, возвращая текст ответа.
+        """
+        # Инициализируем память для этого chat_id, если её нет
+        if chat_id not in chat_memory:
+            # Добавляем system-сообщение, задающее стиль ответов
+            chat_memory[chat_id] = [
+                {
+                    "role": "system",
+                    "content": (
+                        "Ты — дружелюбный ассистент, отвечающий на русском языке. "
+                        "Пожалуйста, используй эмодзи в своих ответах. Будь краток и приветлив."
+                    )
+                }
+            ]
+
+        # Добавляем текущее сообщение пользователя
+        chat_memory[chat_id].append({"role": "user", "content": user_message})
+
         try:
+            # Вызываем OpenAI, передавая весь контекст
             response = await asyncio.to_thread(
                 self.client.chat.completions.create,
-                messages=messages,
+                messages=chat_memory[chat_id],
                 model=Config.OPENAI_MODEL_TEXT,
             )
             logger.info(f"API text output: {response}")
             answer = response.choices[0].message.content
+
+            # Сохраняем ответ ассистента в память
+            chat_memory[chat_id].append({"role": "assistant", "content": answer})
+
             return answer
         except Exception as e:
             logger.error(f"Ошибка OpenAI API (текст): {e}")
             return "Произошла ошибка при обращении к OpenAI API. Попробуйте позже."
 
     async def transcribe_audio(self, audio_bytes: bytes) -> str:
+        """
+        Преобразует аудиофайл в текст с помощью Whisper.
+        """
         try:
             file_obj = io.BytesIO(audio_bytes)
             transcription = await asyncio.to_thread(
@@ -222,17 +249,20 @@ class ChatGPTHandler:
             logger.error(f"Ошибка транскрипции: {e}")
             return None
 
-    async def process_voice_message(self, audio_bytes: bytes) -> Tuple[str, str]:
+    async def process_voice_message(self, audio_bytes: bytes, chat_id: int) -> Tuple[str, str]:
         """
         1. Транскрибирует входной голос (audio_bytes -> текст).
-        2. Генерирует ответ (текст).
+        2. Генерирует ответ (текст) с учётом памяти.
         3. Генерирует MP3-файл ответа (через gTTS).
-        Возвращает (текст, путь_к_MP3).
+        Возвращает (ответ_текстом, путь_к_MP3).
         """
         transcribed = await self.transcribe_audio(audio_bytes)
         if transcribed is None:
             return None, None
-        answer_text = await self.get_text_response(transcribed)
+
+        # Получаем ответ с учётом памяти
+        answer_text = await self.get_text_response(transcribed, chat_id)
+        # Генерируем MP3-файл
         mp3_path = await asyncio.to_thread(generate_voice_answer_gtts, answer_text)
         return answer_text, mp3_path
 
@@ -290,19 +320,17 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.message.chat_id
     user_message = update.message.text
+
     chat_handler: ChatGPTHandler = context.bot_data.get("chat_handler")
     if not chat_handler:
         await update.message.reply_text("Сбой в работе бота. Попробуйте позже.")
         return
 
-    context_msgs = []
-    if chat_id in chat_memory:
-        context_msgs.append(chat_memory[chat_id])
-
-    response_text = await chat_handler.get_text_response(user_message, context_msgs)
-    chat_memory[chat_id] = user_message  # Сохраняем для контекста
+    # Запрашиваем ответ, учитывая историю
+    response_text = await chat_handler.get_text_response(user_message, chat_id)
 
     if voice_mode_enabled.get(chat_id, False):
+        # Генерируем MP3-файл
         mp3_filename = generate_voice_answer_gtts(response_text)
         audio_info = MP3(mp3_filename)
         duration = int(audio_info.info.length) if audio_info and audio_info.info else 0
@@ -326,6 +354,7 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ------------------------------------------------------
 async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.message.chat_id
+
     chat_handler: ChatGPTHandler = context.bot_data.get("chat_handler")
     if not chat_handler:
         await update.message.reply_text("Сбой в работе бота. Попробуйте позже.")
@@ -339,7 +368,8 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Не удалось загрузить голосовое сообщение.")
         return
 
-    transcribed_text, mp3_path = await chat_handler.process_voice_message(file_bytes)
+    # Обрабатываем голосовое сообщение
+    transcribed_text, mp3_path = await chat_handler.process_voice_message(file_bytes, chat_id)
     if transcribed_text is None:
         await update.message.reply_text("Ошибка при распознавании речи.")
         return
@@ -347,6 +377,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Ошибка при генерации голосового ответа.")
         return
 
+    # Сообщим пользователю, что распознали
     await update.message.reply_text(f"Распознано: {transcribed_text}")
 
     try:
@@ -364,10 +395,11 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         os.remove(mp3_path)
 
 # ------------------------------------------------------
-# Обработчик ИЗОБРАЖЕНИЙ (пример из вашего кода)
+# Обработчик ИЗОБРАЖЕНИЙ
 # ------------------------------------------------------
 async def handle_image_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.message.chat_id
+
     chat_handler: ChatGPTHandler = context.bot_data.get("chat_handler")
     if not chat_handler:
         await update.message.reply_text("Сбой в работе бота. Попробуйте позже.")
@@ -384,16 +416,31 @@ async def handle_image_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Не удалось обработать изображение.")
         return
 
+    # Пример, если хотите передавать изображение в OpenAI
     try:
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Опиши, что изображено на этой картинке. Ответь на русском языке."},
-                    {"type": "image_url", "image_url": {"url": data_uri, "detail": "high"}}
-                ]
-            }
-        ]
+        messages = chat_memory.get(chat_id, [])
+        if not messages:
+            # Если нет памяти, создаём system
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "Ты — дружелюбный ассистент, отвечающий на русском языке. "
+                        "Пожалуйста, используй эмодзи в своих ответах. Будь краток и приветлив."
+                    )
+                }
+            ]
+            chat_memory[chat_id] = messages
+
+        # Добавляем запрос пользователя (анализ изображения)
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Опиши, что изображено на этой картинке. Ответь на русском языке."},
+                {"type": "image_url", "image_url": {"url": data_uri, "detail": "high"}}
+            ]
+        })
+
         response = await asyncio.to_thread(
             chat_handler.client.chat.completions.create,
             messages=messages,
@@ -401,7 +448,11 @@ async def handle_image_message(update: Update, context: ContextTypes.DEFAULT_TYP
             max_tokens=300,
         )
         answer = response.choices[0].message.content
+
+        # Сохраняем ответ в память
+        messages.append({"role": "assistant", "content": answer})
         await update.message.reply_text(answer)
+
     except Exception as e:
         logger.error(f"Ошибка OpenAI API (изображение): {e}")
         await update.message.reply_text("Произошла ошибка при анализе изображения. Попробуйте позже.")
